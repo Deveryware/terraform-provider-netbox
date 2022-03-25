@@ -124,7 +124,7 @@ type WritableVirtualMachineWithConfigContext struct {
 
 	// VCPUs
 	// Minimum: 0.01
-	Vcpus *float64 `json:"vcpus,omitempty"`
+	Vcpus *float64 `json:"vcpus"`
 }
 
 // Validate validates this writable virtual machine with config context
@@ -356,7 +356,7 @@ func (m *WritableVirtualMachineWithConfigContext) validateVcpus(formats strfmt.R
 		return nil
 	}
 
-	if err := validate.Minimum("vcpus", "body", *m.Vcpus, 0.01, false); err != nil {
+	if err := validate.Required("vcpus", "body", m.Vcpus); err != nil {
 		return err
 	}
 

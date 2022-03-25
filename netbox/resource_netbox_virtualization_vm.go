@@ -115,6 +115,7 @@ func resourceNetboxVirtualizationVM() *schema.Resource {
 			"vcpus": {
 				Type:     schema.TypeString,
 				Optional: true,
+				Default:  nil,
 				ValidateFunc: validation.StringMatch(
 					regexp.MustCompile("^[0-9]+((.[0-9]){0,1}[0-9]{0,1})$"),
 					"Must be like ^[0-9]+((.[0-9]){0,1}[0-9]{0,1})$"),
@@ -292,7 +293,14 @@ func resourceNetboxVirtualizationVMRead(d *schema.ResourceData,
 				}
 			}
 
-			if err = d.Set("vcpus", fmt.Sprintf("%v", *resource.Vcpus)); err != nil {
+			var vcpus interface{}
+			if resource.Vcpus == nil {
+				vcpus = nil
+			} else {
+				vcpus = fmt.Sprintf("%v", *resource.Vcpus)
+			}
+
+			if err = d.Set("vcpus", vcpus); err != nil {
 				return err
 			}
 
@@ -367,15 +375,27 @@ func resourceNetboxVirtualizationVMUpdate(d *schema.ResourceData,
 		params.Tenant = &tenantID
 	}
 
-	if d.HasChange("vcpus") {
-		vcpus := d.Get("vcpus").(string)
-
-		if !strings.Contains(vcpus, ".") {
-			vcpus = vcpus + ".00"
+	if d.HasChange("comments") {
+		if comments, exist := d.GetOk("comments"); exist {
+			params.Comments = comments.(string)
+		} else {
+			params.Comments = " "
 		}
+	}
 
-		vcpusFloat, _ := strconv.ParseFloat(vcpus, 32)
-		params.Vcpus = &vcpusFloat
+	if d.HasChange("vcpus") {
+		if vcpus, exist := d.GetOk("vcpus"); exist {
+			vcpus := vcpus.(string)
+
+			if !strings.Contains(vcpus, ".") {
+				vcpus = vcpus + ".00"
+			}
+
+			vcpusFloat, _ := strconv.ParseFloat(vcpus, 32)
+			params.Vcpus = &vcpusFloat
+		} else {
+			params.Vcpus = nil
+		}
 	}
 
 	resource := virtualization.NewVirtualizationVirtualMachinesPartialUpdateParams().WithData(params)
