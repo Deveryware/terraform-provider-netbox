@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 
+	"github.com/asaskevich/govalidator"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/validation"
 	netboxclient "github.com/smutel/go-netbox/netbox/client"
@@ -98,11 +100,19 @@ func resourceNetboxIpamIPAddresses() *schema.Resource {
 				Description: "The object type among virtualization.vminterface or dcim.interface (empty by default).",
 			},
 			"primary_ip4": {
-				Type:        schema.TypeBool,
-				Optional:    true,
-				Default:     false,
-				ForceNew:    true,
-				Description: "Set this resource as primary IPv4 (false by default).",
+				Type:          schema.TypeBool,
+				Optional:      true,
+				ForceNew:      true,
+				Description:   "Set this resource as primary IP (false by default).",
+				ConflictsWith: []string{"primary_ip"},
+				Deprecated:    "use primary_ip instead",
+			},
+			"primary_ip": {
+				Type:          schema.TypeBool,
+				Optional:      true,
+				ForceNew:      true,
+				Description:   "Set this resource as primary IP (false by default).",
+				ConflictsWith: []string{"primary_ip4"},
 			},
 			"role": {
 				Type:     schema.TypeString,
@@ -167,6 +177,7 @@ func resourceNetboxIpamIPAddressesCreate(d *schema.ResourceData,
 	objectID := int64(d.Get("object_id").(int))
 	objectType := d.Get("object_type").(string)
 	primaryIP4 := d.Get("primary_ip4").(bool)
+	primaryIP := d.Get("primary_ip").(bool)
 	role := d.Get("role").(string)
 	status := d.Get("status").(string)
 	tags := d.Get("tag").(*schema.Set).List()
@@ -188,7 +199,7 @@ func resourceNetboxIpamIPAddressesCreate(d *schema.ResourceData,
 	}
 
 	var info InfosForPrimary
-	if primaryIP4 && objectID != 0 {
+	if (primaryIP4 || primaryIP) && objectID != 0 {
 		if objectType == VMInterfaceType {
 			var err error
 			info, err = getInfoForPrimary(m, objectID)
@@ -220,8 +231,8 @@ func resourceNetboxIpamIPAddressesCreate(d *schema.ResourceData,
 
 	d.SetId(strconv.FormatInt(resourceCreated.Payload.ID, 10))
 
-	err = updatePrimaryStatus(client, info, resourceCreated.Payload.ID)
-	if err != nil {
+	if err = updatePrimaryStatus(client, info, resourceCreated.Payload.ID,
+		govalidator.IsIPv4(strings.Split(address, "/")[0])); err != nil {
 		return err
 	}
 
@@ -288,18 +299,10 @@ func resourceNetboxIpamIPAddressesRead(d *schema.ResourceData,
 				}
 			}
 
-			if resource.AssignedObjectID == nil {
-				if err = d.Set("object_id", nil); err != nil {
-					return err
-				}
-
-				if err = d.Set("primary_ip4", false); err != nil {
-					return err
-				}
-			} else {
-				if err = d.Set("object_id", resource.AssignedObjectID); err != nil {
-					return err
-				}
+			objectIDValue := interface{}(nil)
+			primaryIpValue := false
+			if resource.AssignedObjectID != nil {
+				objectIDValue = resource.AssignedObjectID
 
 				var info InfosForPrimary
 				if *resource.AssignedObjectID != 0 {
@@ -310,16 +313,27 @@ func resourceNetboxIpamIPAddressesRead(d *schema.ResourceData,
 							return err
 						}
 
-						if info.vmPrimaryIP4ID == resource.ID {
-							if err = d.Set("primary_ip4", true); err != nil {
-								return err
-							}
+						if info.vmPrimaryIP4ID == resource.ID || info.vmPrimaryIP6ID == resource.ID {
+							primaryIpValue = true
 						} else {
-							if err = d.Set("primary_ip4", false); err != nil {
-								return err
-							}
+							primaryIpValue = false
 						}
 					}
+				}
+			}
+			if err = d.Set("object_id", objectIDValue); err != nil {
+				return err
+			}
+
+			if _, ok := d.GetOk("primary_ip4"); ok {
+				if err = d.Set("primary_ip4", primaryIpValue); err != nil {
+					return err
+				}
+			}
+
+			if _, ok := d.GetOk("primary_ip"); ok {
+				if err = d.Set("primary_ip", primaryIpValue); err != nil {
+					return err
 				}
 			}
 
@@ -393,7 +407,6 @@ func resourceNetboxIpamIPAddressesUpdate(d *schema.ResourceData,
 	m interface{}) error {
 	client := m.(*netboxclient.NetBoxAPI)
 	params := &models.WritableIPAddress{}
-	// primary_ip4 := false
 
 	// Required parameters
 	address := d.Get("address").(string)
@@ -401,7 +414,8 @@ func resourceNetboxIpamIPAddressesUpdate(d *schema.ResourceData,
 
 	if d.HasChange("custom_field") {
 		stateCustomFields, resourceCustomFields := d.GetChange("custom_field")
-		customFields := convertCustomFieldsFromTerraformToAPI(stateCustomFields.(*schema.Set).List(), resourceCustomFields.(*schema.Set).List())
+		customFields := convertCustomFieldsFromTerraformToAPI(stateCustomFields.(*schema.Set).List(),
+			resourceCustomFields.(*schema.Set).List())
 		params.CustomFields = &customFields
 	}
 
@@ -429,7 +443,6 @@ func resourceNetboxIpamIPAddressesUpdate(d *schema.ResourceData,
 	}
 
 	if d.HasChange("object_id") || d.HasChange("object_type") {
-		// primary_ip4 = true
 		objectID := int64(d.Get("object_id").(int))
 		params.AssignedObjectID = &objectID
 
@@ -484,36 +497,36 @@ func resourceNetboxIpamIPAddressesUpdate(d *schema.ResourceData,
 		return err
 	}
 
-	/*
-	 *   if primary_ip4 || d.HasChange("primary_ip4") {
-	 *     var info InfosForPrimary
-	 *     objectID := int64(d.Get("object_id").(int))
-	 *     objectType := d.Get("object_type").(string)
-	 *     isPrimary := d.Get("primary_ip4").(bool)
-	 *     if objectID != 0 {
-	 *       if objectType == VMInterfaceType {
-	 *         var err error
-	 *         info, err = getInfoForPrimary(m, objectID)
-	 *         if err != nil {
-	 *           return err
-	 *         }
-	 *       }
-	 *     }
-	 *
-	 *     var ipID int64
-	 *     ipID = 0
-	 *     if isPrimary {
-	 *       ipID, err = strconv.ParseInt(d.Id(), 10, 64)
-	 *       if err != nil {
-	 *         return fmt.Errorf("Unable to convert ID into int64")
-	 *       }
-	 *     }
-	 *     err = updatePrimaryStatus(client, info, ipID)
-	 *     if err != nil {
-	 *       return err
-	 *     }
-	 *   }
-	 */
+	if d.HasChange("address") {
+		var info InfosForPrimary
+		primaryIP4 := false
+		primaryIP := false
+
+		if primaryIP4Value, ok := d.GetOk("primary_ip4"); ok {
+			primaryIP4 = primaryIP4Value.(bool)
+		}
+
+		if primaryIPValue, ok := d.GetOk("primary_ip"); ok {
+			primaryIP = primaryIPValue.(bool)
+		}
+
+		objectID := int64(d.Get("object_id").(int))
+		objectType := d.Get("object_type").(string)
+		if (primaryIP4 || primaryIP) && objectID != 0 {
+			if objectType == VMInterfaceType {
+				var err error
+				info, err = getInfoForPrimary(m, objectID)
+				if err != nil {
+					return err
+				}
+			}
+		}
+
+		if err := updatePrimaryStatus(client, info, resourceID,
+			govalidator.IsIPv4(strings.Split(address, "/")[0])); err != nil {
+			return err
+		}
+	}
 
 	return resourceNetboxIpamIPAddressesRead(d, m)
 }
